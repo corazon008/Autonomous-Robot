@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+        <title>Flux YOLO</title>
+
+        <style>
+            body {
+                margin: 0;
+                background: #111;
+                color: white;
+                font-family: Arial, sans-serif;
+                text-align: center;
+                user-select: none;
+                touch-action: none;
+            }
+
+            h1 {
+                margin: 20px 0;
+            }
+
+            .video {
+                width: min(1080px, 95vw);
+                display: block;
+                margin: 0 auto 30px;
+            }
+
+            .controls {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 80px;
+                flex-wrap: wrap;
+                margin-bottom: 30px;
+            }
+
+            .control-group h2 {
+                margin-bottom: 15px;
+            }
+
+            /* D-Pads */
+            .dpad {
+                display: grid;
+                grid-template-columns: 70px 70px 70px;
+                grid-template-rows: 70px 70px 70px;
+                gap: 5px;
+            }
+
+            button {
+                border: none;
+                border-radius: 12px;
+                background: #333;
+                color: white;
+                cursor: pointer;
+                -webkit-tap-highlight-color: transparent;
+            }
+
+            button:hover {
+                background: #444;
+            }
+
+            button:active,
+            button.active {
+                background: #666;
+                transform: scale(0.94);
+            }
+
+            .dpad button {
+                font-size: 30px;
+            }
+
+            .center {
+                grid-column: 2;
+                grid-row: 2;
+                background: #222;
+                cursor: default;
+            }
+
+            .up {
+                grid-column: 2;
+                grid-row: 1;
+            }
+
+            .left {
+                grid-column: 1;
+                grid-row: 2;
+            }
+
+            .down {
+                grid-column: 2;
+                grid-row: 3;
+            }
+
+            .right {
+                grid-column: 3;
+                grid-row: 2;
+            }
+
+            .status {
+                margin-top: 20px;
+                color: #aaa;
+                font-size: 16px;
+            }
+        </style>
+    </head>
+
+    <body>
+        <h1>Flux YOLO</h1>
+
+        <img class="video" src="/video" />
+
+        <div class="controls">
+            <!-- MOVEMENT -->
+            <div class="control-group">
+                <h2>Movement</h2>
+
+                <div class="dpad">
+                    <button class="up" data-command="forward">▲</button>
+
+                    <button class="left" data-command="left">◀</button>
+
+                    <button class="center">●</button>
+
+                    <button class="right" data-command="right">▶</button>
+
+                    <button class="down" data-command="backward">▼</button>
+                </div>
+            </div>
+
+            <!-- CAMERA -->
+            <div class="control-group">
+                <h2>Camera</h2>
+
+                <div class="dpad">
+                    <button class="up" data-command="camera_up">▲</button>
+
+                    <button class="left" data-command="camera_left">◀</button>
+
+                    <button class="center">●</button>
+
+                    <button class="right" data-command="camera_right">▶</button>
+
+                    <button class="down" data-command="camera_down">▼</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="status">
+            <span id="status">Ready</span>
+        </div>
+
+        <script>
+            let activeCommand = null;
+            let commandInterval = null;
+
+            function sendCommand(command) {
+                fetch("/command/" + command, {
+                    method: "POST",
+                }).catch((error) => {
+                    console.error("Command error:", error);
+                });
+            }
+
+            function startCommand(command, button) {
+                // Prevent multiple commands running simultaneously
+                stopCommand();
+
+                activeCommand = command;
+                button.classList.add("active");
+
+                document.getElementById("status").textContent =
+                    "Command: " + command;
+
+                // Send immediately
+                sendCommand(command);
+
+                // Keep sending while held
+                commandInterval = setInterval(() => {
+                    sendCommand(command);
+                }, 100);
+            }
+
+            function stopCommand() {
+                if (commandInterval !== null) {
+                    clearInterval(commandInterval);
+                    commandInterval = null;
+                }
+
+                if (activeCommand !== null) {
+                    sendCommand("stop");
+                }
+
+                activeCommand = null;
+
+                document.querySelectorAll("button.active").forEach((button) => {
+                    button.classList.remove("active");
+                });
+
+                document.getElementById("status").textContent = "Ready";
+            }
+
+            // Mouse + touchscreen support
+            document.querySelectorAll("[data-command]").forEach((button) => {
+                button.addEventListener("pointerdown", (event) => {
+                    event.preventDefault();
+
+                    button.setPointerCapture(event.pointerId);
+
+                    startCommand(button.dataset.command, button);
+                });
+
+                button.addEventListener("pointerup", (event) => {
+                    event.preventDefault();
+                    stopCommand();
+                });
+
+                button.addEventListener("pointercancel", (event) => {
+                    stopCommand();
+                });
+
+                button.addEventListener("pointerleave", (event) => {
+                    // Only stop if the pointer is no longer pressed
+                    if (event.buttons === 0) {
+                        stopCommand();
+                    }
+                });
+            });
+
+            // Safety: stop the robot if the browser window loses focus
+            window.addEventListener("blur", () => {
+                stopCommand();
+            });
+
+            // Safety: stop when the page is closed/navigated away
+            window.addEventListener("beforeunload", () => {
+                navigator.sendBeacon("/command/stop", "");
+            });
+        </script>
+    </body>
+</html>
