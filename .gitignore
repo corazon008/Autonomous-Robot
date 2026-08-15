@@ -229,3 +229,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 /Freenove_4WD_Smart_Car_Kit_for_Raspberry_Pi
+bus.jpg
+/yolo26n_ncnn_model
+yolo26n.pt
