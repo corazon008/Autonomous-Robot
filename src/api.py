@@ -1,33 +1,24 @@
-import cv2
 from flask import Flask, jsonify, Response
-from picamera2 import Picamera2
-from libcamera import Transform
-import detect
 from pathlib import Path
 
 from servo import Servo
 from motor import Ordinary_Car
+from videoCamera import VideoCamera
 
 WORKING_DIR = Path(__file__).parent
+
 
 print("Setting up the camera...")
 pwm_servo = Servo()
 car = Ordinary_Car()
 
-picam2 = Picamera2()
-picam2.configure(
-    picam2.create_preview_configuration(
-        main={"size": (1920, 1080), "format": "RGB888"},
-        #transform=Transform(hflip=1, vflip=1)
-    )
-)
-picam2.start()
+cam = VideoCamera(use_model=True, frame_to_skip=15)
 
 app = Flask(__name__)
 
 @app.route('/video')
 def video():
-    return Response(detect.generate_frames(picam2),
+    return Response(cam.generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/')
