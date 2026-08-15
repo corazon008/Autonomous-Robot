@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Benchmark YOLO models across formats, quantizations and image sizes.
+
+Compares torch / onnx (fp32, fp16) / ncnn (fp32, fp16) on frames extracted
+from an MP4 video and writes per-config latency stats to a CSV.
+
+NCNN corrupts its allocator when switching input sizes within one process, so
+each (ncnn config, imgsz) pair is benchmarked in a fresh subprocess.
+
+Usage:
+    python benchmark_yolo.py --model yolo26n.pt --video video.mp4
+"""
+
+import argparse
+import csv
+import json
+import shutil
+import statistics
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import cv2
+
+from ultralytics import YOLO
+
+EXPORT_DIR = Path("exports")
+OUTPUT_CSV = "benchmark_results.csv"
+
+# (format, quantize_label, export_kwargs)
+CONFIGS = [
+    ("torch", "fp32", None),
+    ("onnx", "fp32", {"dynamic": True, "simplify": True}),
+    ("onnx", "fp16", {"dynamic": True, "simplify": True, "quantize": 16}),
+    ("ncnn", "fp32", {"quantize": None}),
+    ("ncnn", "fp16", {"quantize": 16}),
+]
+
+IMGSZ = [320, 480, 640, 800, 960]
+WARMUP = 2
+EXPORT_IMGSZ = 640
+
+
+def extract_frames(video: Path, n: int) -> list:
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video}")
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 0:
+        total = n
+    indices = [round(i * (total - 1) / max(n - 1, 1)) for i in range(n)]
+    frames, pos = [], -1
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        frames.append(frame)
+    cap.release()
+    if not frames:
+        raise RuntimeError(f"No frames could be read from {video}")
+    return frames
+
+
+def ncnn_model_dir(cfg_dir: Path) -> Path | None:
+    for p in cfg_dir.rglob("*.ncnn.param"):
+        return p.parent
+    return None
+
+
+def ensure_export(model: Path, fmt: str, quantize: str, export_kwargs: dict | None) -> tuple[str, float]:
+    if fmt == "torch":
+        return str(model), 0.0
+    cfg_dir = EXPORT_DIR / f"{fmt}_{quantize}"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    if fmt == "onnx":
+        artifact = cfg_dir / "model.onnx"
+        if artifact.exists():
+            return str(artifact), 0.0
+    elif fmt == "ncnn":
+        existing = ncnn_model_dir(cfg_dir)
+        if existing is not None:
+            return str(existing), 0.0
+        artifact = None
+    else:
+        raise ValueError(fmt)
+
+    src = cfg_dir / "model.pt"
+    if not src.exists():
+        shutil.copy2(model, src)
+    m = YOLO(src)
+    t0 = time.perf_counter()
+    m.export(format=fmt, imgsz=EXPORT_IMGSZ, **(export_kwargs or {}))
+    elapsed = time.perf_counter() - t0
+
+    if fmt == "onnx":
+        if not artifact.exists():
+            raise RuntimeError(f"Export produced no artifact at {artifact}")
+        return str(artifact), elapsed
+    found = ncnn_model_dir(cfg_dir)
+    if found is None:
+        raise RuntimeError(f"Export produced no NCNN model dir under {cfg_dir}")
+    return str(found), elapsed
+
+
+def benchmark_one(model: Path, fmt: str, quantize: str, export_kwargs: dict | None,
+                  frames: list, imgsz: int, fresh_per_frame: bool = False) -> dict:
+    artifact, export_s = ensure_export(model, fmt, quantize, export_kwargs)
+    m = YOLO(artifact, task="detect")
+    for _ in range(WARMUP):
+        m.predict(frames[0], imgsz=imgsz, verbose=False)
+    times = []
+    for frame in frames:
+        if fresh_per_frame:
+            m = YOLO(artifact, task="detect")
+        t0 = time.perf_counter()
+        m.predict(frame, imgsz=imgsz, verbose=False)
+        times.append((time.perf_counter() - t0) * 1000)
+    mean = statistics.fmean(times)
+    note = " (net rebuilt per frame)" if fresh_per_frame else ""
+    return {
+        "format": fmt,
+        "quantize": quantize,
+        "imgsz": imgsz,
+        "mean_ms": round(mean, 3),
+        "median_ms": round(statistics.median(times), 3),
+        "std_ms": round(statistics.pstdev(times), 3),
+        "min_ms": round(min(times), 3),
+        "max_ms": round(max(times), 3),
+        "fps": round(1000 / mean, 2),
+        "status": "ok" + note,
+    }
+
+
+def error_row(fmt: str, quantize: str, imgsz: int, err: Exception) -> dict:
+    return {
+        "format": fmt, "quantize": quantize, "imgsz": imgsz,
+        "mean_ms": "", "median_ms": "", "std_ms": "", "min_ms": "", "max_ms": "", "fps": "",
+        "status": f"ERROR: {err}",
+    }
+
+
+def write_csv(rows: list, out: Path) -> None:
+    fields = ["format", "quantize", "imgsz", "mean_ms", "median_ms", "std_ms", "min_ms", "max_ms", "fps", "status"]
+    with open(out, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Saved {len(rows)} rows -> {out}")
+
+
+def run_worker(args: argparse.Namespace) -> dict:
+    model, video = Path(args.model), Path(args.video)
+    config = next(c for c in CONFIGS if c[0] == args.fmt and c[1] == args.quant)
+    frames = extract_frames(video, args.frames)
+    try:
+        fresh = args.fmt == "ncnn" and args.imgsz[0] == 320
+        return benchmark_one(model, config[0], config[1], config[2], frames, args.imgsz[0], fresh_per_frame=fresh)
+    except Exception as e:  # noqa: BLE001
+        return error_row(config[0], config[1], args.imgsz[0], e)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Benchmark YOLO export formats/quantizations/image sizes")
+    parser.add_argument("--model", default="yolo26n.pt", help="Source .pt model")
+    parser.add_argument("--video", default="video.mp4", help="MP4 video for test frames")
+    parser.add_argument("--frames", type=int, default=60, help="Number of test frames")
+    parser.add_argument("--imgsz", type=int, nargs="+", default=IMGSZ, help="Image sizes (multiples of 32)")
+    parser.add_argument("--out", default=OUTPUT_CSV, help="CSV output path")
+    parser.add_argument("--fmt", choices={c[0] for c in CONFIGS}, help="Worker mode: format to benchmark")
+    parser.add_argument("--quant", choices={c[1] for c in CONFIGS}, help="Worker mode: quantize to benchmark")
+    args = parser.parse_args()
+
+    if args.fmt or args.quant:
+        row = run_worker(args)
+        print(json.dumps(row))
+        return
+
+    model, video = Path(args.model), Path(args.video)
+    if not model.exists():
+        raise SystemExit(f"Model not found: {model}")
+    if not video.exists():
+        raise SystemExit(f"Video not found: {video}")
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+
+    frames = extract_frames(video, args.frames)
+    print(f"Extracted {len(frames)} frames from {video}")
+
+    rows = []
+    for fmt, quantize, export_kwargs in CONFIGS:
+        for imgsz in args.imgsz:
+            if fmt == "ncnn":
+                cmd = [sys.executable, str(Path(__file__)), "--model", str(model), "--video", str(video),
+                       "--frames", str(args.frames), "--fmt", fmt, "--quant", quantize, "--imgsz", str(imgsz)]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, IndexError):
+                    row = error_row(fmt, quantize, imgsz, RuntimeError(f"worker failed: {proc.stderr[-300:]}"))
+            else:
+                try:
+                    row = benchmark_one(model, fmt, quantize, export_kwargs, frames, imgsz)
+                except Exception as e:  # noqa: BLE001
+                    row = error_row(fmt, quantize, imgsz, e)
+            rows.append(row)
+            print(f"  [{fmt} {quantize}] imgsz={imgsz}: "
+                  f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) {row.get('status', '')}")
+
+    write_csv(rows, Path(args.out))
+
+
+if __name__ == "__main__":
+    main()
