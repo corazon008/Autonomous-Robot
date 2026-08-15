@@ -12,7 +12,7 @@ print("Setting up the camera...")
 pwm_servo = Servo()
 car = Ordinary_Car()
 
-cam = VideoCamera(model="yolo26n_ncnn_model", use_model=True, frame_to_skip=15)
+cam = VideoCamera(model="yolo26n.onnx", use_model=True, frame_to_drop_ratio=0.1)
 
 app = Flask(__name__)
 

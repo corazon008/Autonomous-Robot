@@ -8,18 +8,31 @@ import time
 
 class VideoCamera:
     def __init__(
-        self, model: YOLO | str, use_model: bool = True, frame_to_skip: int = 30
+        self,
+        model: YOLO | str,
+        use_model: bool = True,
+        frame_to_drop_ratio: float = 1 / 2,
+        **kwargs,
     ):
+        """
+        Initializes the VideoCamera object.
+        @param model: YOLO model or path to the model weights.
+        @param use_model: Whether to use the YOLO model for detection.
+        @param frame_to_drop_ratio: Ratio of frames to skip for YOLO detection (0 means no skipping).
+        @param kwargs: Additional keyword arguments for camera configuration."""
         self.cam = Picamera2()
-        cam_config = self.cam.create_preview_configuration(
-            main={"format": "XRGB8888", "size": (640, 480)}
+        cam_config = self.cam.create_video_configuration(
+            main={"format": "RGB888", "size": (640 * 3, 480 * 3)},
+            queue=kwargs.get("queue", False),
         )
-        print(f"Camera sensor resolution: {self.cam.sensor_resolution}")
+        print(f"Camera sensor resolution: {cam_config["main"]["size"]}")
+        print(f"FPS: {self.cam.video_configuration.controls.FrameRate}")
+        self.FPS = self.cam.video_configuration.controls.FrameRate
         self.cam.configure(cam_config)
         self.cam.start()
 
         self.model = (
-            YOLO(model) if isinstance(model, str) else model
+            YOLO(model, task="detect") if isinstance(model, str) else model
         )  # Load the YOLO model if a path is provided
 
         # Measurements
@@ -30,7 +43,9 @@ class VideoCamera:
 
         self.USE_MODEL = use_model  # Set to False to disable YOLO detection
 
-        self.FRAME_TO_SKIP = frame_to_skip  # Number of frames to skip for YOLO detection (0 means no skipping)
+        self.FRAME_TO_SKIP = int(
+            self.FPS * frame_to_drop_ratio
+        )  # Number of frames to skip for YOLO detection
         self.current_frame_nb = 0
 
     def get_frame(self) -> bytes:
@@ -53,12 +68,13 @@ class VideoCamera:
             frame = self.cam.capture_array()
 
             if self.USE_MODEL and (
-                self.current_frame_nb % self.FRAME_TO_SKIP == 0
+                self.FRAME_TO_SKIP != 0
+                or self.current_frame_nb % self.FRAME_TO_SKIP == 0
             ):
                 # Inference YOLO
                 start_time = time.time()
                 results = self.model(
-                    frame, imgsz=32 * 20, classes=[0], verbose=False
+                    frame, imgsz=320, classes=[0], verbose=False
                 )  # classes=[0] for person detection
                 end_time = time.time()
 
