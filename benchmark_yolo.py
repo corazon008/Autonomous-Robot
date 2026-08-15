@@ -37,7 +37,7 @@ CONFIGS = [
     ("ncnn", "fp16", {"quantize": 16}),
 ]
 
-IMGSZ = [320, 480, 640, 800, 960]
+IMGSZ = [320, 480, 640, 800]
 WARMUP = 2
 EXPORT_IMGSZ = 640
 
@@ -69,7 +69,9 @@ def ncnn_model_dir(cfg_dir: Path) -> Path | None:
     return None
 
 
-def ensure_export(model: Path, fmt: str, quantize: str, export_kwargs: dict | None) -> tuple[str, float]:
+def ensure_export(
+    model: Path, fmt: str, quantize: str, export_kwargs: dict | None
+) -> tuple[str, float]:
     if fmt == "torch":
         return str(model), 0.0
     cfg_dir = EXPORT_DIR / f"{fmt}_{quantize}"
@@ -104,8 +106,15 @@ def ensure_export(model: Path, fmt: str, quantize: str, export_kwargs: dict | No
     return str(found), elapsed
 
 
-def benchmark_one(model: Path, fmt: str, quantize: str, export_kwargs: dict | None,
-                  frames: list, imgsz: int, fresh_per_frame: bool = False) -> dict:
+def benchmark_one(
+    model: Path,
+    fmt: str,
+    quantize: str,
+    export_kwargs: dict | None,
+    frames: list,
+    imgsz: int,
+    fresh_per_frame: bool = False,
+) -> dict:
     artifact, export_s = ensure_export(model, fmt, quantize, export_kwargs)
     m = YOLO(artifact, task="detect")
     for _ in range(WARMUP):
@@ -135,14 +144,32 @@ def benchmark_one(model: Path, fmt: str, quantize: str, export_kwargs: dict | No
 
 def error_row(fmt: str, quantize: str, imgsz: int, err: Exception) -> dict:
     return {
-        "format": fmt, "quantize": quantize, "imgsz": imgsz,
-        "mean_ms": "", "median_ms": "", "std_ms": "", "min_ms": "", "max_ms": "", "fps": "",
+        "format": fmt,
+        "quantize": quantize,
+        "imgsz": imgsz,
+        "mean_ms": "",
+        "median_ms": "",
+        "std_ms": "",
+        "min_ms": "",
+        "max_ms": "",
+        "fps": "",
         "status": f"ERROR: {err}",
     }
 
 
 def write_csv(rows: list, out: Path) -> None:
-    fields = ["format", "quantize", "imgsz", "mean_ms", "median_ms", "std_ms", "min_ms", "max_ms", "fps", "status"]
+    fields = [
+        "format",
+        "quantize",
+        "imgsz",
+        "mean_ms",
+        "median_ms",
+        "std_ms",
+        "min_ms",
+        "max_ms",
+        "fps",
+        "status",
+    ]
     with open(out, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -156,20 +183,50 @@ def run_worker(args: argparse.Namespace) -> dict:
     frames = extract_frames(video, args.frames)
     try:
         fresh = args.fmt == "ncnn" and args.imgsz[0] == 320
-        return benchmark_one(model, config[0], config[1], config[2], frames, args.imgsz[0], fresh_per_frame=fresh)
+        return benchmark_one(
+            model,
+            config[0],
+            config[1],
+            config[2],
+            frames,
+            args.imgsz[0],
+            fresh_per_frame=fresh,
+        )
     except Exception as e:  # noqa: BLE001
         return error_row(config[0], config[1], args.imgsz[0], e)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark YOLO export formats/quantizations/image sizes")
-    parser.add_argument("--model", default="yolo26n.pt", help="Source .pt model")
-    parser.add_argument("--video", default="video.mp4", help="MP4 video for test frames")
-    parser.add_argument("--frames", type=int, default=60, help="Number of test frames")
-    parser.add_argument("--imgsz", type=int, nargs="+", default=IMGSZ, help="Image sizes (multiples of 32)")
+    parser = argparse.ArgumentParser(
+        description="Benchmark YOLO export formats/quantizations/image sizes"
+    )
+    parser.add_argument(
+        "--model", default="yolo26n.pt", help="Source .pt model"
+    )
+    parser.add_argument(
+        "--video", default="video.mp4", help="MP4 video for test frames"
+    )
+    parser.add_argument(
+        "--frames", type=int, default=60, help="Number of test frames"
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        nargs="+",
+        default=IMGSZ,
+        help="Image sizes (multiples of 32)",
+    )
     parser.add_argument("--out", default=OUTPUT_CSV, help="CSV output path")
-    parser.add_argument("--fmt", choices={c[0] for c in CONFIGS}, help="Worker mode: format to benchmark")
-    parser.add_argument("--quant", choices={c[1] for c in CONFIGS}, help="Worker mode: quantize to benchmark")
+    parser.add_argument(
+        "--fmt",
+        choices={c[0] for c in CONFIGS},
+        help="Worker mode: format to benchmark",
+    )
+    parser.add_argument(
+        "--quant",
+        choices={c[1] for c in CONFIGS},
+        help="Worker mode: quantize to benchmark",
+    )
     args = parser.parse_args()
 
     if args.fmt or args.quant:
@@ -191,22 +248,49 @@ def main() -> None:
     for fmt, quantize, export_kwargs in CONFIGS:
         for imgsz in args.imgsz:
             if fmt == "ncnn":
-                cmd = [sys.executable, str(Path(__file__)), "--model", str(model), "--video", str(video),
-                       "--frames", str(args.frames), "--fmt", fmt, "--quant", quantize, "--imgsz", str(imgsz)]
+                cmd = [
+                    sys.executable,
+                    str(Path(__file__)),
+                    "--model",
+                    str(model),
+                    "--video",
+                    str(video),
+                    "--frames",
+                    str(args.frames),
+                    "--fmt",
+                    fmt,
+                    "--quant",
+                    quantize,
+                    "--imgsz",
+                    str(imgsz),
+                ]
                 proc = subprocess.run(cmd, capture_output=True, text=True)
-                line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+                line = (
+                    proc.stdout.strip().splitlines()[-1]
+                    if proc.stdout.strip()
+                    else ""
+                )
                 try:
                     row = json.loads(line)
                 except (json.JSONDecodeError, IndexError):
-                    row = error_row(fmt, quantize, imgsz, RuntimeError(f"worker failed: {proc.stderr[-300:]}"))
+                    row = error_row(
+                        fmt,
+                        quantize,
+                        imgsz,
+                        RuntimeError(f"worker failed: {proc.stderr[-300:]}"),
+                    )
             else:
                 try:
-                    row = benchmark_one(model, fmt, quantize, export_kwargs, frames, imgsz)
+                    row = benchmark_one(
+                        model, fmt, quantize, export_kwargs, frames, imgsz
+                    )
                 except Exception as e:  # noqa: BLE001
                     row = error_row(fmt, quantize, imgsz, e)
             rows.append(row)
-            print(f"  [{fmt} {quantize}] imgsz={imgsz}: "
-                  f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) {row.get('status', '')}")
+            print(
+                f"  [{fmt} {quantize}] imgsz={imgsz}: "
+                f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) {row.get('status', '')}"
+            )
 
     write_csv(rows, Path(args.out))
 
