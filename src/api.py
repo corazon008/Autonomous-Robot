@@ -12,21 +12,26 @@ print("Setting up the camera...")
 pwm_servo = Servo()
 car = Ordinary_Car()
 
-cam = VideoCamera(use_model=True, frame_to_skip=15)
+cam = VideoCamera(model="yolo26n_ncnn_model", use_model=True, frame_to_skip=15)
 
 app = Flask(__name__)
 
-@app.route('/video')
-def video():
-    return Response(cam.generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/')
+@app.route("/video")
+def video():
+    return Response(
+        cam.generate_frames(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/")
 def index():
-    with open(WORKING_DIR / 'static' / 'index.html', 'r') as f:
+    with open(WORKING_DIR / "static" / "index.html", "r") as f:
         return f.read()
 
-@app.route('/command/<command>', methods=['POST'])
+
+@app.route("/command/<command>", methods=["POST"])
 def command(command):
     # Camera control commands
     if command == "camera_left":
@@ -76,6 +81,7 @@ def command(command):
     else:
         return jsonify({"status": "error", "message": "Invalid command"}), 400
     return jsonify({"status": "success"})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
