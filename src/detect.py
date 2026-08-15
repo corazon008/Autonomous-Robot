@@ -12,7 +12,7 @@ import time
 playmobile_height_ratio = 0.185 # 0.18
 playmobil_distance = 50 #cm
 
-USE_MODEL = True # Set to False to disable YOLO detection
+USE_MODEL = False # Set to False to disable YOLO detection
 
 if USE_MODEL:
     model = YOLO("yolo26n_ncnn_model")

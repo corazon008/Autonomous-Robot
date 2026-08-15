@@ -6,11 +6,13 @@ import detect
 from pathlib import Path
 
 from servo import Servo
+from motor import Ordinary_Car
 
 WORKING_DIR = Path(__file__).parent
 
 print("Setting up the camera...")
 pwm_servo = Servo()
+car = Ordinary_Car()
 
 picam2 = Picamera2()
 picam2.configure(
@@ -35,6 +37,7 @@ def index():
 
 @app.route('/command/<command>', methods=['POST'])
 def command(command):
+    # Camera control commands
     if command == "camera_left":
         # Handle camera left command
         pwm_servo.move_left_incremental(5)
@@ -47,7 +50,40 @@ def command(command):
     elif command == "camera_down":
         # Handle camera down command
         pwm_servo.move_down_incremental(5)
-    # Handle the command logic here
+
+    # Movement control commands
+    elif command == "backward":
+        # Handle forward command
+        car.left_upper_wheel(1000)
+        car.right_upper_wheel(1000)
+        car.left_lower_wheel(1000)
+        car.right_lower_wheel(1000)
+    elif command == "forward":
+        # Handle backward command
+        car.left_upper_wheel(-1000)
+        car.right_upper_wheel(-1000)
+        car.left_lower_wheel(-1000)
+        car.right_lower_wheel(-1000)
+    elif command == "left":
+        # Handle left command
+        car.left_upper_wheel(-1000)
+        car.right_upper_wheel(1000)
+        car.left_lower_wheel(-1000)
+        car.right_lower_wheel(1000)
+    elif command == "right":
+        # Handle right command
+        car.left_upper_wheel(1000)
+        car.right_upper_wheel(-1000)
+        car.left_lower_wheel(1000)
+        car.right_lower_wheel(-1000)
+    elif command == "stop":
+        # Handle stop command
+        car.left_upper_wheel(0)
+        car.right_upper_wheel(0)
+        car.left_lower_wheel(0)
+        car.right_lower_wheel(0)
+    else:
+        return jsonify({"status": "error", "message": "Invalid command"}), 400
     return jsonify({"status": "success"})
 
 if __name__ == "__main__":
