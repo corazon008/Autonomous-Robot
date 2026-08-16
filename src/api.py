@@ -1,5 +1,10 @@
+import os
 from flask import Flask, jsonify, Response
 from pathlib import Path
+
+# Leave one CPU core free for stream serving so YOLO inference stays stable
+# when a client connects. Tune 1-4; comment out to use all cores.
+# os.environ.setdefault("OMP_NUM_THREADS", "3")
 
 from servo import Servo
 from motor import Ordinary_Car
@@ -13,9 +18,9 @@ pwm_servo = Servo()
 car = Ordinary_Car()
 
 cam = VideoCamera(
-    model="yolo26s.onnx",
+    model="yolo26n.onnx",
     use_model=True,
-    inference_interval_ms=0,
+    inference_interval_ms=250,
     imgsz=480,
 )
 

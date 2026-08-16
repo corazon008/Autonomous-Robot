@@ -13,6 +13,13 @@ PERSONE_DISTANCE = (
     50  # Distance in cm at which the Playmobil figure is placed from the camera
 )
 
+CAMERA_RESOLUTION = (1920, 1440)  # Camera resolution (width, height)
+
+STREAM_WIDTH = (
+    1280  # Stream downscale width (detection still runs on full-res frames)
+)
+JPEG_QUALITY = 70  # Stream JPEG quality
+
 
 class VideoCamera:
     def __init__(
@@ -32,7 +39,7 @@ class VideoCamera:
 
         self.cam = Picamera2()
         cam_config = self.cam.create_preview_configuration(
-            main={"format": "RGB888", "size": (1920, 1440)},
+            main={"format": "RGB888", "size": CAMERA_RESOLUTION},
             queue=kwargs.get("queue", False),
         )
         print(f"Camera sensor resolution: {cam_config["main"]["size"]}")
@@ -59,6 +66,7 @@ class VideoCamera:
         # Shared state between the inference thread and the stream consumer
         self._frame_lock = threading.Lock()
         self._latest_frame: np.ndarray | None = None
+        self._frame_version = 0
         self._running = True
 
         self._thread = threading.Thread(
@@ -101,6 +109,7 @@ class VideoCamera:
 
             with self._frame_lock:
                 self._latest_frame = frame
+                self._frame_version += 1
 
     def _draw_detections(self, frame: np.ndarray, result) -> np.ndarray:
         """Draws the YOLO detections on a copy of the frame."""
@@ -140,12 +149,12 @@ class VideoCamera:
             )
         return frame
 
-    def _get_latest_frame(self) -> np.ndarray:
-        """Returns the latest captured frame, blocking briefly until one is available."""
+    def _get_latest_frame(self) -> tuple[np.ndarray, int]:
+        """Returns the latest captured frame (and its version), blocking briefly until one is available."""
         while self._running:
             with self._frame_lock:
                 if self._latest_frame is not None:
-                    return self._latest_frame
+                    return self._latest_frame, self._frame_version
             time.sleep(0.01)
         raise RuntimeError("Camera stopped")
 
@@ -153,19 +162,35 @@ class VideoCamera:
         """
         Returns the latest frame from the camera as a JPEG-encoded byte string.
         """
-        frame = self._get_latest_frame()
+        frame, _ = self._get_latest_frame()
         ret, buffer = cv2.imencode(".jpg", frame)
         return buffer.tobytes()
 
     def generate_frames(self) -> Generator[bytes]:
         """
         Generates frames from the video capture object with YOLO detections drawn on them.
+
+        Runs only when a new frame is produced (never busy-loops), and downscales the
+        frame before JPEG encoding so the stream thread stays light on the CPU.
         """
+        last_sent_version = -1
         while self._running:
-            frame = self._get_latest_frame()
+            frame, version = self._get_latest_frame()
+            if version == last_sent_version:
+                time.sleep(0.05)
+                continue
+            last_sent_version = version
+
+            if frame.shape[1] > STREAM_WIDTH:
+                scale = STREAM_WIDTH / frame.shape[1]
+                frame = cv2.resize(
+                    frame, (STREAM_WIDTH, round(frame.shape[0] * scale))
+                )
 
             # Encoder en JPEG
-            ret, buffer = cv2.imencode(".jpg", frame)
+            ret, buffer = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            )
             frame_bytes = buffer.tobytes()
 
             # Envoyer la frame encodée
