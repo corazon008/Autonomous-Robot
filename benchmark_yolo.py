@@ -40,6 +40,8 @@ CONFIGS = [
 IMGSZ = [320, 480, 640, 800]
 WARMUP = 2
 EXPORT_IMGSZ = 640
+PERSON_CLASS = 0
+EXPECTED_PERSONS = 3
 
 
 def extract_frames(video: Path, n: int) -> list:
@@ -119,13 +121,14 @@ def benchmark_one(
     m = YOLO(artifact, task="detect")
     for _ in range(WARMUP):
         m.predict(frames[0], imgsz=imgsz, verbose=False)
-    times = []
+    times, persons = [], []
     for frame in frames:
         if fresh_per_frame:
             m = YOLO(artifact, task="detect")
         t0 = time.perf_counter()
-        m.predict(frame, imgsz=imgsz, verbose=False)
+        results = m.predict(frame, imgsz=imgsz, verbose=False)
         times.append((time.perf_counter() - t0) * 1000)
+        persons.append(int((results[0].boxes.cls == PERSON_CLASS).sum()))
     mean = statistics.fmean(times)
     note = " (net rebuilt per frame)" if fresh_per_frame else ""
     return {
@@ -138,6 +141,13 @@ def benchmark_one(
         "min_ms": round(min(times), 3),
         "max_ms": round(max(times), 3),
         "fps": round(1000 / mean, 2),
+        "avg_persons": round(statistics.fmean(persons), 3),
+        "accuracy": round(
+            statistics.fmean(
+                min(p, EXPECTED_PERSONS) / EXPECTED_PERSONS for p in persons
+            ),
+            3,
+        ),
         "status": "ok" + note,
     }
 
@@ -153,6 +163,8 @@ def error_row(fmt: str, quantize: str, imgsz: int, err: Exception) -> dict:
         "min_ms": "",
         "max_ms": "",
         "fps": "",
+        "avg_persons": "",
+        "accuracy": "",
         "status": f"ERROR: {err}",
     }
 
@@ -168,6 +180,8 @@ def write_csv(rows: list, out: Path) -> None:
         "min_ms",
         "max_ms",
         "fps",
+        "avg_persons",
+        "accuracy",
         "status",
     ]
     with open(out, "w", newline="") as f:
@@ -204,7 +218,7 @@ def main() -> None:
         "--model", default="yolo26n.pt", help="Source .pt model"
     )
     parser.add_argument(
-        "--video", default="video.mp4", help="MP4 video for test frames"
+        "--video", default="video.avi", help="MP4 video for test frames"
     )
     parser.add_argument(
         "--frames", type=int, default=60, help="Number of test frames"
@@ -289,7 +303,9 @@ def main() -> None:
             rows.append(row)
             print(
                 f"  [{fmt} {quantize}] imgsz={imgsz}: "
-                f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) {row.get('status', '')}"
+                f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) "
+                f"persons={row.get('avg_persons', '-')} acc={row.get('accuracy', '-')} "
+                f"{row.get('status', '')}"
             )
 
     write_csv(rows, Path(args.out))
