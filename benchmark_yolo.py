@@ -41,7 +41,7 @@ IMGSZ = [320, 480, 640, 800]
 WARMUP = 2
 EXPORT_IMGSZ = 640
 PERSON_CLASS = 0
-EXPECTED_PERSONS = 3
+EXPECTED_PERSONS = 4
 
 
 def extract_frames(video: Path, n: int) -> list:
@@ -126,7 +126,7 @@ def benchmark_one(
         if fresh_per_frame:
             m = YOLO(artifact, task="detect")
         t0 = time.perf_counter()
-        results = m.predict(frame, imgsz=imgsz, verbose=False)
+        results = m.predict(frame, imgsz=imgsz, verbose=False, conf=0.4)
         times.append((time.perf_counter() - t0) * 1000)
         persons.append(int((results[0].boxes.cls == PERSON_CLASS).sum()))
     mean = statistics.fmean(times)
