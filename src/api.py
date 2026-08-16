@@ -13,7 +13,10 @@ pwm_servo = Servo()
 car = Ordinary_Car()
 
 cam = VideoCamera(
-    model="yolo26n.onnx", use_model=True, inference_interval_ms=500
+    model="yolo26s.onnx",
+    use_model=True,
+    inference_interval_ms=0,
+    imgsz=480,
 )
 
 app = Flask(__name__)

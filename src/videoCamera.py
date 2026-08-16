@@ -6,12 +6,20 @@ from ultralytics import YOLO
 import numpy as np
 import time
 
+CONFIDENCE = 0.4  # Confidence threshold for YOLO detections
+
+PERSON_SIZE = 0.184  # Average height of a Playmobil figure in pixel on a 1440p image (1920x1440) at a distance of 50 cm
+PERSONE_DISTANCE = (
+    50  # Distance in cm at which the Playmobil figure is placed from the camera
+)
+
 
 class VideoCamera:
     def __init__(
         self,
         model: YOLO | str,
         use_model: bool = True,
+        imgsz: int = 480,
         inference_interval_ms: float = 500,
         **kwargs,
     ):
@@ -21,9 +29,10 @@ class VideoCamera:
         @param use_model: Whether to use the YOLO model for detection.
         @param inference_interval_ms: Minimum interval in milliseconds between two YOLO inferences.
         @param kwargs: Additional keyword arguments for camera configuration."""
+
         self.cam = Picamera2()
-        cam_config = self.cam.create_video_configuration(
-            main={"format": "RGB888", "size": (2592, 1944)},
+        cam_config = self.cam.create_preview_configuration(
+            main={"format": "RGB888", "size": (1920, 1440)},
             queue=kwargs.get("queue", False),
         )
         print(f"Camera sensor resolution: {cam_config["main"]["size"]}")
@@ -38,11 +47,11 @@ class VideoCamera:
 
         # Measurements
         self.playmobile_height_ratio = (
-            0.185 * cam_config["main"]["size"][1] / 1080
-        )  # 0.18 for (1920, 1080)
-        self.playmobil_distance = 50  # cm
+            PERSON_SIZE * cam_config["main"]["size"][1] / 1440
+        )
 
         self.USE_MODEL = use_model  # Set to False to disable YOLO detection
+        self.imgsz = imgsz  # Image size for YOLO inference
 
         self.inference_interval_ms = inference_interval_ms
         self._last_inference_time = 0.0
@@ -78,7 +87,7 @@ class VideoCamera:
             if run_inference:
                 start_time = time.time()
                 results = self.model(
-                    frame, imgsz=320, classes=[0], verbose=False
+                    frame, imgsz=self.imgsz, classes=[0], verbose=False
                 )  # classes=[0] for person detection
                 end_time = time.time()
                 print(
@@ -103,17 +112,16 @@ class VideoCamera:
             # Confidence
             conf = float(box.conf[0])
 
-            if conf < 0.5:  # Filter out low-confidence detections
+            if conf < CONFIDENCE:  # Filter out low-confidence detections
                 continue
 
             # Class ID and name
             cls = int(box.cls[0])
             box_height_px = y2 - y1
             screen_ratio = box_height_px / frame.shape[0]
+
             distance = (
-                self.playmobile_height_ratio
-                * self.playmobil_distance
-                / screen_ratio
+                self.playmobile_height_ratio * PERSONE_DISTANCE / screen_ratio
             )  # Calculate distance based on box height
             label = f"{self.model.names[cls]} {conf:.2f} distance : {distance:.2f} cm"
 
