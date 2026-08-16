@@ -233,3 +233,4 @@ bus.jpg
 /yolo26n_ncnn_model
 yolo26n.pt
 exports
+*.csv

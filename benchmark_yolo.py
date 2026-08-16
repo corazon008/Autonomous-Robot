@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
 import shutil
 import statistics
@@ -24,6 +25,7 @@ from pathlib import Path
 import cv2
 
 from ultralytics import YOLO
+from ultralytics import __version__ as UL_VERSION
 
 EXPORT_DIR = Path("exports")
 OUTPUT_CSV = "benchmark_results.csv"
@@ -42,6 +44,8 @@ WARMUP = 2
 EXPORT_IMGSZ = 640
 PERSON_CLASS = 0
 EXPECTED_PERSONS = 4
+CONF = 0.4
+SANITY_THRESHOLD = 3.0
 
 
 def extract_frames(video: Path, n: int) -> list:
@@ -71,32 +75,64 @@ def ncnn_model_dir(cfg_dir: Path) -> Path | None:
     return None
 
 
+def cfg_dir_for(model: Path, fmt: str, quantize: str) -> Path:
+    return EXPORT_DIR / model.stem / f"{fmt}_{quantize}"
+
+
+def source_fingerprint(model: Path, export_kwargs: dict | None) -> dict:
+    sha = hashlib.sha256()
+    with open(model, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            sha.update(chunk)
+    return {
+        "source_sha256": sha.hexdigest(),
+        "imgsz": EXPORT_IMGSZ,
+        "export_args": export_kwargs or {},
+        "ultralytics": UL_VERSION,
+    }
+
+
+def marker_matches(cfg_dir: Path, expected: dict) -> bool:
+    marker = cfg_dir / "marker.json"
+    if not marker.exists():
+        return False
+    try:
+        return json.loads(marker.read_text()) == expected
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
 def ensure_export(
     model: Path, fmt: str, quantize: str, export_kwargs: dict | None
 ) -> tuple[str, float]:
     if fmt == "torch":
         return str(model), 0.0
-    cfg_dir = EXPORT_DIR / f"{fmt}_{quantize}"
+    cfg_dir = cfg_dir_for(model, fmt, quantize)
     cfg_dir.mkdir(parents=True, exist_ok=True)
+    expected = source_fingerprint(model, export_kwargs)
+
     if fmt == "onnx":
         artifact = cfg_dir / "model.onnx"
-        if artifact.exists():
+        if artifact.exists() and marker_matches(cfg_dir, expected):
             return str(artifact), 0.0
     elif fmt == "ncnn":
         existing = ncnn_model_dir(cfg_dir)
-        if existing is not None:
+        if existing is not None and marker_matches(cfg_dir, expected):
             return str(existing), 0.0
         artifact = None
     else:
         raise ValueError(fmt)
 
+    # Stale or missing artifact: wipe the config dir and re-export.
+    shutil.rmtree(cfg_dir, ignore_errors=True)
+    cfg_dir.mkdir(parents=True, exist_ok=True)
     src = cfg_dir / "model.pt"
-    if not src.exists():
-        shutil.copy2(model, src)
+    shutil.copy2(model, src)
     m = YOLO(src)
     t0 = time.perf_counter()
     m.export(format=fmt, imgsz=EXPORT_IMGSZ, **(export_kwargs or {}))
     elapsed = time.perf_counter() - t0
+    (cfg_dir / "marker.json").write_text(json.dumps(expected, indent=2))
 
     if fmt == "onnx":
         if not artifact.exists():
@@ -119,18 +155,22 @@ def benchmark_one(
 ) -> dict:
     artifact, export_s = ensure_export(model, fmt, quantize, export_kwargs)
     m = YOLO(artifact, task="detect")
+    note = ""
     for _ in range(WARMUP):
+        if fresh_per_frame:
+            m = YOLO(artifact, task="detect")
         m.predict(frames[0], imgsz=imgsz, verbose=False)
     times, persons = [], []
     for frame in frames:
         if fresh_per_frame:
             m = YOLO(artifact, task="detect")
         t0 = time.perf_counter()
-        results = m.predict(frame, imgsz=imgsz, verbose=False, conf=0.4)
+        results = m.predict(frame, imgsz=imgsz, verbose=False, conf=CONF)
         times.append((time.perf_counter() - t0) * 1000)
         persons.append(int((results[0].boxes.cls == PERSON_CLASS).sum()))
     mean = statistics.fmean(times)
-    note = " (net rebuilt per frame)" if fresh_per_frame else ""
+    if fresh_per_frame:
+        note += " (net rebuilt per frame)"
     return {
         "format": fmt,
         "quantize": quantize,
@@ -196,7 +236,7 @@ def run_worker(args: argparse.Namespace) -> dict:
     config = next(c for c in CONFIGS if c[0] == args.fmt and c[1] == args.quant)
     frames = extract_frames(video, args.frames)
     try:
-        fresh = args.fmt == "ncnn" and args.imgsz[0] == 320
+        fresh = args.fmt == "ncnn" and args.imgsz[0] != EXPORT_IMGSZ
         return benchmark_one(
             model,
             config[0],
@@ -232,6 +272,11 @@ def main() -> None:
     )
     parser.add_argument("--out", default=OUTPUT_CSV, help="CSV output path")
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete this model's exports and re-export from scratch",
+    )
+    parser.add_argument(
         "--fmt",
         choices={c[0] for c in CONFIGS},
         help="Worker mode: format to benchmark",
@@ -254,6 +299,12 @@ def main() -> None:
     if not video.exists():
         raise SystemExit(f"Video not found: {video}")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+
+    if args.clean:
+        model_dir = EXPORT_DIR / model.stem
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
+            print(f"Cleaned {model_dir}")
 
     frames = extract_frames(video, args.frames)
     print(f"Extracted {len(frames)} frames from {video}")
@@ -287,11 +338,15 @@ def main() -> None:
                 try:
                     row = json.loads(line)
                 except (json.JSONDecodeError, IndexError):
+                    detail = f" (exit {proc.returncode})"
+                    tail = proc.stderr.strip().splitlines()
+                    if tail:
+                        detail += f": {tail[-1][:200]}"
                     row = error_row(
                         fmt,
                         quantize,
                         imgsz,
-                        RuntimeError(f"worker failed: {proc.stderr[-300:]}"),
+                        RuntimeError(f"worker crashed{detail}"),
                     )
             else:
                 try:
@@ -307,6 +362,21 @@ def main() -> None:
                 f"persons={row.get('avg_persons', '-')} acc={row.get('accuracy', '-')} "
                 f"{row.get('status', '')}"
             )
+
+    refs = {
+        r["imgsz"]: r["avg_persons"]
+        for r in rows
+        if r["format"] == "torch" and isinstance(r["avg_persons"], (int, float))
+    }
+    for r in rows:
+        if r["format"] == "torch" or not isinstance(r["avg_persons"], (int, float)):
+            continue
+        ref = refs.get(r["imgsz"])
+        if ref is None:
+            continue
+        delta = abs(r["avg_persons"] - ref)
+        if delta > SANITY_THRESHOLD:
+            r["status"] = f"{r['status']} | SANITY vs torch Δ={delta:.1f} persons".strip()
 
     write_csv(rows, Path(args.out))
 
