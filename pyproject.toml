@@ -9,6 +9,7 @@ dependencies = [
     "gpiozero>=2.0.1.post3",
     "ncnn>=1.0.20260526",
     "opencv-python>=4.13.0.92",
+    "picamera2>=0.3.37",
     "pnnx>=20260526",
     "rpi-ws281x>=5.0.0",
     "smbus>=1.1.post2",
