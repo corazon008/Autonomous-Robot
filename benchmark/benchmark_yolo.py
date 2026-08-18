@@ -2,13 +2,14 @@
 """Benchmark YOLO models across formats, quantizations and image sizes.
 
 Compares torch / onnx (fp32, fp16) / ncnn (fp32, fp16) on frames extracted
-from an MP4 video and writes per-config latency stats to a CSV.
+from a video and writes per-config latency stats to a CSV. Several models can
+be benchmarked in one run and merged into the same CSV.
 
 NCNN corrupts its allocator when switching input sizes within one process, so
 each (ncnn config, imgsz) pair is benchmarked in a fresh subprocess.
 
 Usage:
-    python benchmark_yolo.py --model yolo26n.pt --video video.mp4
+    python benchmark/benchmark_yolo.py --models yolo26n.pt yolo26s.pt
 """
 
 import argparse
@@ -27,8 +28,12 @@ import cv2
 from ultralytics import YOLO
 from ultralytics import __version__ as UL_VERSION
 
-EXPORT_DIR = Path("exports")
-OUTPUT_CSV = "benchmark_results.csv"
+BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parent
+
+EXPORT_DIR = BASE_DIR / "exports"
+RESULTS_DIR = BASE_DIR / "results"
+OUTPUT_CSV = RESULTS_DIR / "benchmark_results.csv"
 
 # (format, quantize_label, export_kwargs)
 CONFIGS = [
@@ -172,6 +177,7 @@ def benchmark_one(
     if fresh_per_frame:
         note += " (net rebuilt per frame)"
     return {
+        "model": model.name,
         "format": fmt,
         "quantize": quantize,
         "imgsz": imgsz,
@@ -192,8 +198,11 @@ def benchmark_one(
     }
 
 
-def error_row(fmt: str, quantize: str, imgsz: int, err: Exception) -> dict:
+def error_row(
+    model: Path, fmt: str, quantize: str, imgsz: int, err: Exception
+) -> dict:
     return {
+        "model": model.name,
         "format": fmt,
         "quantize": quantize,
         "imgsz": imgsz,
@@ -211,6 +220,7 @@ def error_row(fmt: str, quantize: str, imgsz: int, err: Exception) -> dict:
 
 def write_csv(rows: list, out: Path) -> None:
     fields = [
+        "model",
         "format",
         "quantize",
         "imgsz",
@@ -231,6 +241,24 @@ def write_csv(rows: list, out: Path) -> None:
     print(f"Saved {len(rows)} rows -> {out}")
 
 
+def load_rows(csv_path: Path) -> list[dict]:
+    """Load existing rows from a CSV, normalized to the expected fields."""
+    if not csv_path.exists():
+        return []
+    with open(csv_path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def merge_rows(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Replace rows matching (model, format, quantize, imgsz) with new ones,
+    preserving file order otherwise."""
+    def key(r):
+        return (r.get("model"), r.get("format"), r.get("quantize"), int(r.get("imgsz", -1)))
+    new_keys = {key(r) for r in new}
+    keep = [r for r in existing if key(r) not in new_keys]
+    return keep + new
+
+
 def run_worker(args: argparse.Namespace) -> dict:
     model, video = Path(args.model), Path(args.video)
     config = next(c for c in CONFIGS if c[0] == args.fmt and c[1] == args.quant)
@@ -247,7 +275,7 @@ def run_worker(args: argparse.Namespace) -> dict:
             fresh_per_frame=fresh,
         )
     except Exception as e:  # noqa: BLE001
-        return error_row(config[0], config[1], args.imgsz[0], e)
+        return error_row(model, config[0], config[1], args.imgsz[0], e)
 
 
 def main() -> None:
@@ -255,10 +283,13 @@ def main() -> None:
         description="Benchmark YOLO export formats/quantizations/image sizes"
     )
     parser.add_argument(
-        "--model", default="yolo26n.pt", help="Source .pt model"
+        "--models",
+        nargs="+",
+        default=["yolo26n.pt", "yolo26s.pt"],
+        help="Source .pt models (relative to repo root)",
     )
     parser.add_argument(
-        "--video", default="video.avi", help="MP4 video for test frames"
+        "--video", default="video.avi", help="Video for test frames"
     )
     parser.add_argument(
         "--frames", type=int, default=60, help="Number of test frames"
@@ -270,11 +301,16 @@ def main() -> None:
         default=IMGSZ,
         help="Image sizes (multiples of 32)",
     )
-    parser.add_argument("--out", default=OUTPUT_CSV, help="CSV output path")
+    parser.add_argument("--out", default=None, help="CSV output path")
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Merge results into the existing CSV instead of overwriting",
+    )
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="Delete this model's exports and re-export from scratch",
+        help="Delete the models' exports and re-export from scratch",
     )
     parser.add_argument(
         "--fmt",
@@ -286,6 +322,10 @@ def main() -> None:
         choices={c[1] for c in CONFIGS},
         help="Worker mode: quantize to benchmark",
     )
+    parser.add_argument(
+        "--model",
+        help="Worker mode: single model path",
+    )
     args = parser.parse_args()
 
     if args.fmt or args.quant:
@@ -293,92 +333,107 @@ def main() -> None:
         print(json.dumps(row))
         return
 
-    model, video = Path(args.model), Path(args.video)
-    if not model.exists():
-        raise SystemExit(f"Model not found: {model}")
+    models = [Path(m) if Path(m).is_absolute() else REPO_ROOT / m for m in args.models]
+    for model in models:
+        if not model.exists():
+            raise SystemExit(f"Model not found: {model}")
+    video = Path(args.video) if Path(args.video).is_absolute() else REPO_ROOT / args.video
     if not video.exists():
         raise SystemExit(f"Video not found: {video}")
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-
-    if args.clean:
-        model_dir = EXPORT_DIR / model.stem
-        if model_dir.exists():
-            shutil.rmtree(model_dir)
-            print(f"Cleaned {model_dir}")
+    out = Path(args.out) if args.out else OUTPUT_CSV
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     frames = extract_frames(video, args.frames)
     print(f"Extracted {len(frames)} frames from {video}")
 
-    rows = []
-    for fmt, quantize, export_kwargs in CONFIGS:
-        for imgsz in args.imgsz:
-            if fmt == "ncnn":
-                cmd = [
-                    sys.executable,
-                    str(Path(__file__)),
-                    "--model",
-                    str(model),
-                    "--video",
-                    str(video),
-                    "--frames",
-                    str(args.frames),
-                    "--fmt",
-                    fmt,
-                    "--quant",
-                    quantize,
-                    "--imgsz",
-                    str(imgsz),
-                ]
-                proc = subprocess.run(cmd, capture_output=True, text=True)
-                line = (
-                    proc.stdout.strip().splitlines()[-1]
-                    if proc.stdout.strip()
-                    else ""
-                )
-                try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, IndexError):
-                    detail = f" (exit {proc.returncode})"
-                    tail = proc.stderr.strip().splitlines()
-                    if tail:
-                        detail += f": {tail[-1][:200]}"
-                    row = error_row(
+    all_rows = []
+    for model in models:
+        if args.clean:
+            model_dir = EXPORT_DIR / model.stem
+            if model_dir.exists():
+                shutil.rmtree(model_dir)
+                print(f"Cleaned {model_dir}")
+
+        print(f"=== Benchmarking {model} ===")
+        rows = []
+        for fmt, quantize, export_kwargs in CONFIGS:
+            for imgsz in args.imgsz:
+                if fmt == "ncnn":
+                    cmd = [
+                        sys.executable,
+                        str(Path(__file__)),
+                        "--model",
+                        str(model),
+                        "--video",
+                        str(video),
+                        "--frames",
+                        str(args.frames),
+                        "--fmt",
                         fmt,
+                        "--quant",
                         quantize,
-                        imgsz,
-                        RuntimeError(f"worker crashed{detail}"),
+                        "--imgsz",
+                        str(imgsz),
+                    ]
+                    proc = subprocess.run(cmd, capture_output=True, text=True)
+                    line = (
+                        proc.stdout.strip().splitlines()[-1]
+                        if proc.stdout.strip()
+                        else ""
                     )
-            else:
-                try:
-                    row = benchmark_one(
-                        model, fmt, quantize, export_kwargs, frames, imgsz
-                    )
-                except Exception as e:  # noqa: BLE001
-                    row = error_row(fmt, quantize, imgsz, e)
-            rows.append(row)
-            print(
-                f"  [{fmt} {quantize}] imgsz={imgsz}: "
-                f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) "
-                f"persons={row.get('avg_persons', '-')} acc={row.get('accuracy', '-')} "
-                f"{row.get('status', '')}"
-            )
+                    try:
+                        row = json.loads(line)
+                    except (json.JSONDecodeError, IndexError):
+                        detail = f" (exit {proc.returncode})"
+                        tail = proc.stderr.strip().splitlines()
+                        if tail:
+                            detail += f": {tail[-1][:200]}"
+                        row = error_row(
+                            model,
+                            fmt,
+                            quantize,
+                            imgsz,
+                            RuntimeError(f"worker crashed{detail}"),
+                        )
+                else:
+                    try:
+                        row = benchmark_one(
+                            model, fmt, quantize, export_kwargs, frames, imgsz
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        row = error_row(model, fmt, quantize, imgsz, e)
+                rows.append(row)
+                print(
+                    f"  [{fmt} {quantize}] imgsz={imgsz}: "
+                    f"{row.get('mean_ms', '-')} ms ({row.get('fps', '-')} fps) "
+                    f"persons={row.get('avg_persons', '-')} acc={row.get('accuracy', '-')} "
+                    f"{row.get('status', '')}"
+                )
 
-    refs = {
-        r["imgsz"]: r["avg_persons"]
-        for r in rows
-        if r["format"] == "torch" and isinstance(r["avg_persons"], (int, float))
-    }
-    for r in rows:
-        if r["format"] == "torch" or not isinstance(r["avg_persons"], (int, float)):
-            continue
-        ref = refs.get(r["imgsz"])
-        if ref is None:
-            continue
-        delta = abs(r["avg_persons"] - ref)
-        if delta > SANITY_THRESHOLD:
-            r["status"] = f"{r['status']} | SANITY vs torch Δ={delta:.1f} persons".strip()
+        refs = {
+            r["imgsz"]: r["avg_persons"]
+            for r in rows
+            if r["format"] == "torch"
+            and isinstance(r["avg_persons"], (int, float))
+        }
+        for r in rows:
+            if r["format"] == "torch" or not isinstance(
+                r["avg_persons"], (int, float)
+            ):
+                continue
+            ref = refs.get(r["imgsz"])
+            if ref is None:
+                continue
+            delta = abs(r["avg_persons"] - ref)
+            if delta > SANITY_THRESHOLD:
+                r["status"] = (
+                    f"{r['status']} | SANITY vs torch Δ={delta:.1f} persons"
+                ).strip()
+        all_rows.extend(rows)
 
-    write_csv(rows, Path(args.out))
+    if args.append:
+        all_rows = merge_rows(load_rows(out), all_rows)
+    write_csv(all_rows, out)
 
 
 if __name__ == "__main__":
