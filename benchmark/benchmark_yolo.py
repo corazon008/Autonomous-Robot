@@ -42,6 +42,10 @@ CONFIGS = [
     ("onnx", "fp16", {"dynamic": True, "simplify": True, "quantize": 16}),
     ("ncnn", "fp32", {"quantize": None}),
     ("ncnn", "fp16", {"quantize": 16}),
+    ("openvino", "fp32", {"dynamic": True}),
+    ("openvino", "fp16", {"dynamic": True, "quantize": 16}),
+    ("mnn", "fp32", {"dynamic": True}),
+    ("mnn", "fp16", {"dynamic": True, "quantize": 16}),
 ]
 
 IMGSZ = [320, 480, 640, 800]
@@ -76,6 +80,12 @@ def extract_frames(video: Path, n: int) -> list:
 
 def ncnn_model_dir(cfg_dir: Path) -> Path | None:
     for p in cfg_dir.rglob("*.ncnn.param"):
+        return p.parent
+    return None
+
+
+def openvino_model_dir(cfg_dir: Path) -> Path | None:
+    for p in cfg_dir.rglob("*.xml"):
         return p.parent
     return None
 
@@ -120,8 +130,17 @@ def ensure_export(
         artifact = cfg_dir / "model.onnx"
         if artifact.exists() and marker_matches(cfg_dir, expected):
             return str(artifact), 0.0
+    elif fmt == "mnn":
+        artifact = cfg_dir / "model.mnn"
+        if artifact.exists() and marker_matches(cfg_dir, expected):
+            return str(artifact), 0.0
     elif fmt == "ncnn":
         existing = ncnn_model_dir(cfg_dir)
+        if existing is not None and marker_matches(cfg_dir, expected):
+            return str(existing), 0.0
+        artifact = None
+    elif fmt == "openvino":
+        existing = openvino_model_dir(cfg_dir)
         if existing is not None and marker_matches(cfg_dir, expected):
             return str(existing), 0.0
         artifact = None
@@ -143,10 +162,17 @@ def ensure_export(
         if not artifact.exists():
             raise RuntimeError(f"Export produced no artifact at {artifact}")
         return str(artifact), elapsed
+    if fmt == "mnn":
+        if not artifact.exists():
+            raise RuntimeError(f"Export produced no artifact at {artifact}")
+        return str(artifact), elapsed
     found = ncnn_model_dir(cfg_dir)
-    if found is None:
-        raise RuntimeError(f"Export produced no NCNN model dir under {cfg_dir}")
-    return str(found), elapsed
+    if found is not None:
+        return str(found), elapsed
+    found = openvino_model_dir(cfg_dir)
+    if found is not None:
+        return str(found), elapsed
+    raise RuntimeError(f"Export produced no model dir under {cfg_dir}")
 
 
 def benchmark_one(
@@ -252,8 +278,15 @@ def load_rows(csv_path: Path) -> list[dict]:
 def merge_rows(existing: list[dict], new: list[dict]) -> list[dict]:
     """Replace rows matching (model, format, quantize, imgsz) with new ones,
     preserving file order otherwise."""
+
     def key(r):
-        return (r.get("model"), r.get("format"), r.get("quantize"), int(r.get("imgsz", -1)))
+        return (
+            r.get("model"),
+            r.get("format"),
+            r.get("quantize"),
+            int(r.get("imgsz", -1)),
+        )
+
     new_keys = {key(r) for r in new}
     keep = [r for r in existing if key(r) not in new_keys]
     return keep + new
@@ -333,11 +366,17 @@ def main() -> None:
         print(json.dumps(row))
         return
 
-    models = [Path(m) if Path(m).is_absolute() else REPO_ROOT / m for m in args.models]
+    models = [
+        Path(m) if Path(m).is_absolute() else REPO_ROOT / m for m in args.models
+    ]
     for model in models:
         if not model.exists():
             raise SystemExit(f"Model not found: {model}")
-    video = Path(args.video) if Path(args.video).is_absolute() else REPO_ROOT / args.video
+    video = (
+        Path(args.video)
+        if Path(args.video).is_absolute()
+        else REPO_ROOT / args.video
+    )
     if not video.exists():
         raise SystemExit(f"Video not found: {video}")
     out = Path(args.out) if args.out else OUTPUT_CSV

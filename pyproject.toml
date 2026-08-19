@@ -7,8 +7,11 @@ requires-python = ">=3.13"
 dependencies = [
     "flask>=3.1.3",
     "gpiozero>=2.0.1.post3",
+    "mnn>=3.6.1",
     "ncnn>=1.0.20260526",
+    "onnx>=1.22.0",
     "opencv-python>=4.13.0.92",
+    "openvino>=2026.3.0",
     "picamera2>=0.3.37",
     "pnnx>=20260526",
     "rpi-ws281x>=5.0.0",
