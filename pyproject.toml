@@ -12,7 +12,6 @@ dependencies = [
     "onnx>=1.22.0",
     "opencv-python>=4.13.0.92",
     "openvino>=2026.3.0",
-    "picamera2>=0.3.37",
     "pnnx>=20260526",
     "rpi-ws281x>=5.0.0",
     "smbus>=1.1.post2",
